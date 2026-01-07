@@ -37,12 +37,33 @@ def get_available_seats():
     url = f"{BASE_URL}/api/mod/venue/seat/list?openId={OPEN_ID}&id={CENTER_ID}&day={get_tomorrow()}"
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
+        if res.status_code != 200:
+            print(f"🚫 查询空位失败：HTTP {res.status_code}（不影响盲抢策略）")
+            seats_query_done = True
+            return []
+        
+        try:
+            data = res.json()
+        except ValueError:
+            print(f"🚫 查询空位失败：响应不是有效的JSON格式（不影响盲抢策略）")
+            seats_query_done = True
+            return []
+        
+        # 检查响应 code
+        if data.get("code") != 0:
+            print(f"🚫 查询空位失败：{data.get('msg', '未知错误')}（不影响盲抢策略）")
+            seats_query_done = True
+            return []
+        
         seat_list = data.get("data", {}).get("seatList", [])
         available_seats_cache = [seat["seatNumber"] for seat in seat_list if seat["status"] == 0]
         seats_query_done = True
         print(f"📊 后台查询完成，可用座位：{available_seats_cache}")
         return available_seats_cache
+    except requests.exceptions.RequestException as e:
+        print(f"🚫 查询空位失败：{e}（不影响盲抢策略）")
+        seats_query_done = True
+        return []
     except Exception as e:
         print(f"🚫 查询空位失败：{e}（不影响盲抢策略）")
         seats_query_done = True
@@ -71,7 +92,20 @@ def reserve(seat_number, start_time=None):
         }
         try:
             res = requests.post(url, headers=headers, data=data, timeout=5)
-            result = res.json()
+            # 检查 HTTP 状态码
+            if res.status_code != 200:
+                print(f"⚠️ 座位 {seat_number} HTTP错误：{res.status_code}")
+                time.sleep(retry_interval)
+                continue
+            
+            # 尝试解析 JSON
+            try:
+                result = res.json()
+            except ValueError as e:
+                print(f"⚠️ 座位 {seat_number} JSON解析失败：{e}，响应内容：{res.text[:100]}")
+                time.sleep(retry_interval)
+                continue
+            
             msg = result.get("msg", "")
             # 核心改动：判断 code 是否为 0
             if result.get("code") == 0:
@@ -91,24 +125,48 @@ def reserve(seat_number, start_time=None):
                     print(f"❌ 座位 {seat_number} 预约失败：{msg}，继续重试...")
                 else:
                     print(f"❌ 座位 {seat_number} 预约失败：{msg}，{retry_interval//60}分钟后重试")
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             print(f"⚠️ 请求异常: {e}")
+        except Exception as e:
+            print(f"⚠️ 未知异常: {e}")
         time.sleep(retry_interval)
 
 def check_reservation_success():
     url = f"{BASE_URL}/api/mod/venue/enrol?openId={OPEN_ID}&status=0&page=1&limit=10"
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
+        if res.status_code != 200:
+            print(f"❌ 获取预约记录失败：HTTP {res.status_code}")
+            return
+        
+        try:
+            data = res.json()
+        except ValueError:
+            print("❌ 获取预约记录失败：响应不是有效的JSON格式")
+            return
+        
+        # 检查响应 code
+        if data.get("code") != 0:
+            print(f"❌ 获取预约记录失败：{data.get('msg', '未知错误')}")
+            return
+        
         records = data.get("data", {}).get("records", [])
         if not records:
             print("📭 没有查到预约记录")
             return
+        
         print("📌 当前预约记录：")
         for rec in records:
-            print(f"🪑 座位：{rec.get('seatNumberList')} | 日期：{rec.get('day')} | 状态：{rec.get('status')}")
+            seat = rec.get('seatNumberList', '未知')
+            # 根据抓包，日期字段可能是 reserveDay 或 day
+            day = rec.get('reserveDay') or rec.get('day', '未知')
+            title = rec.get('title', '未知场馆')
+            status = rec.get('appointStatusName') or rec.get('appointStatusMsg', '未知状态')
+            print(f"🪑 场馆：{title} | 座位：{seat} | 日期：{day} | 状态：{status}")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ 获取预约记录失败：{e}")
     except Exception as e:
-        print("❌ 获取预约记录失败：", e)
+        print(f"❌ 获取预约记录失败：{e}")
 
 def wait_until_target_time():
     """精准对时：等待到 21:59:59.850 左右自动触发"""
