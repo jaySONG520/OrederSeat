@@ -4,16 +4,18 @@ import requests
 OPEN_ID = 'oBTGB5P68o7-XW-OhgeCrKyFdsGY'
 ACCESS_TOKEN = '435cc5872307437b97a2c844d04fb4f1'
 
+BASE_URL = "https://order-admin-ext.bnszwhw.cn"
+
 headers = {
     "xweb_xhr": "1",
     "access-token": ACCESS_TOKEN,
     "Content-Type": "application/x-www-form-urlencoded",
     "User-Agent": "Mozilla/5.0 MicroMessenger/7.0.20.1781(0x6700143B)",
-    "Referer": "https://servicewechat.com/wxb3e386ddfe6d15f9/13/page-frame.html"
+    "Referer": "https://servicewechat.com/wxb3e386ddfe6d15f9/14/page-frame.html"
 }
 
 def check_reservation_success():
-    url = f"https://changguan.yunlib.cn/api/mod/venue/enrol?openId={OPEN_ID}&status=0&page=1&limit=10"
+    url = f"{BASE_URL}/api/mod/venue/enrol?openId={OPEN_ID}&status=0&page=1&limit=10"
     try:
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
