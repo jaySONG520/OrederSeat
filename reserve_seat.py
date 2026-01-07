@@ -18,25 +18,34 @@ headers = {
     "access-token": ACCESS_TOKEN,
     "Content-Type": "application/x-www-form-urlencoded",
     "User-Agent": "Mozilla/5.0 MicroMessenger/7.0.20.1781(0x6700143B)",
+    # ⚠️ 注意：Referer 版本号可能会更新，如果抢座失败请检查是否变为 15 或更高版本
     "Referer": "https://servicewechat.com/wxb3e386ddfe6d15f9/14/page-frame.html"
 }
 
 lock = threading.Lock()
 success = False  # 全局预约成功标志
+available_seats_cache = []  # 缓存查询到的空位列表
+seats_query_done = False  # 空位查询是否完成
 
 def get_tomorrow():
     # 转换为 2026/01/08 这种斜杠格式
     return (datetime.datetime.now() + datetime.timedelta(days=1)).strftime('%Y/%m/%d')
 
 def get_available_seats():
+    """查询可用座位（异步调用，不阻塞主流程）"""
+    global available_seats_cache, seats_query_done
     url = f"{BASE_URL}/api/mod/venue/seat/list?openId={OPEN_ID}&id={CENTER_ID}&day={get_tomorrow()}"
     try:
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
         seat_list = data.get("data", {}).get("seatList", [])
-        return [seat["seatNumber"] for seat in seat_list if seat["status"] == 0]
+        available_seats_cache = [seat["seatNumber"] for seat in seat_list if seat["status"] == 0]
+        seats_query_done = True
+        print(f"📊 后台查询完成，可用座位：{available_seats_cache}")
+        return available_seats_cache
     except Exception as e:
-        print("🚫 查询空位失败：", e)
+        print(f"🚫 查询空位失败：{e}（不影响盲抢策略）")
+        seats_query_done = True
         return []
 
 def reserve(seat_number, start_time=None):
@@ -124,7 +133,7 @@ def wait_until_target_time():
             break
 
 def main():
-    print("🚀 自动预约抢座系统启动")
+    print("🚀 自动预约抢座系统启动（盲抢策略）")
     print("=" * 50)
     
     # 精准对时：等待到 21:59:59.850 左右自动触发
@@ -134,28 +143,49 @@ def main():
     print(f"\n🎬 开始抢座！时间：{datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
     print("=" * 50)
     
-    available = get_available_seats()
-    print(f"🎯 可预约座位：{available}")
-
-    target_seats = [s for s in PREFERRED_SEATS if s in available]
-    other_seats = [s for s in available if s not in PREFERRED_SEATS]
-    seats_to_try = target_seats + other_seats
-
-    if not seats_to_try:
-        print("❌ 当前无可预约座位")
-        return
-
-    print(f"📋 优先座位：{target_seats}")
-    print(f"📋 其他座位：{other_seats}")
-    print(f"🚀 启动 {len(seats_to_try)} 个并发线程开始抢座...\n")
-
+    # ⚡ 盲抢策略：立即对心仪座位发起抢座，不等待查询结果
+    print(f"⚡ 盲抢模式：直接对心仪座位 {PREFERRED_SEATS} 发起抢座...")
+    print("📡 同时后台异步查询空位列表（作为备用）\n")
+    
+    # 启动后台线程异步查询空位（不阻塞主流程）
+    def query_seats_background():
+        get_available_seats()
+    
+    query_thread = threading.Thread(target=query_seats_background, daemon=True)
+    query_thread.start()
+    
+    # 立即对心仪座位发起盲抢
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for seat in seats_to_try:
+        # 第一波：直接盲抢心仪座位
+        for seat in PREFERRED_SEATS:
             executor.submit(reserve, seat, start_time)
         
-        # 等待所有任务完成（或成功）
+        print(f"🚀 已启动 {len(PREFERRED_SEATS)} 个盲抢线程\n")
+        
+        # 等待一段时间，如果心仪座位都失败，再使用查询到的空位
+        fallback_triggered = False
+        wait_count = 0
+        max_wait = 50  # 最多等待5秒（50 * 0.1秒）后触发备用策略
+        
         while not success:
             time.sleep(0.1)
+            wait_count += 1
+            
+            # 如果等待超过一定时间且查询已完成，启动备用座位抢座
+            if not fallback_triggered and wait_count >= max_wait and seats_query_done:
+                if available_seats_cache:
+                    # 过滤掉已经在抢的心仪座位
+                    backup_seats = [s for s in available_seats_cache if s not in PREFERRED_SEATS]
+                    if backup_seats:
+                        print(f"\n🔄 心仪座位暂未成功，启动备用座位抢座：{backup_seats}")
+                        for seat in backup_seats:
+                            executor.submit(reserve, seat, start_time)
+                        fallback_triggered = True
+                else:
+                    print("\n⚠️ 查询接口无返回或所有座位已被抢完")
+                    fallback_triggered = True
+        
+        print("\n✅ 抢座流程结束")
 
 if __name__ == "__main__":
     main()
