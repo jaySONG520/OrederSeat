@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul 2>&1
 title 巴南图书馆自动抢座系统 - 考研加油！
 color 0a
 
@@ -10,7 +11,8 @@ echo.
 :: 1. 检查 Python 环境
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [错误] 未检测到 Python 环境，请先安装 Python 3.13。
+    echo [错误] 未检测到 Python 环境，请先安装 Python 3.x。
+    echo [提示] 建议安装 Python 3.7 或更高版本
     pause
     exit
 )

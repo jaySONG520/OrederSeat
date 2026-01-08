@@ -24,6 +24,7 @@ headers = {
 
 lock = threading.Lock()
 success = False  # 全局预约成功标志
+check_called = False  # 确保 check_reservation_success 只被调用一次
 available_seats_cache = []  # 缓存查询到的空位列表
 seats_query_done = False  # 空位查询是否完成
 
@@ -70,7 +71,7 @@ def get_available_seats():
         return []
 
 def reserve(seat_number, start_time=None):
-    global success
+    global success, check_called
     while not success:
         # 计算动态重试间隔：高峰期前30秒使用0.1秒，之后使用正常间隔
         if start_time:
@@ -91,10 +92,12 @@ def reserve(seat_number, start_time=None):
             "seatNumberList": seat_number
         }
         try:
-            res = requests.post(url, headers=headers, data=data, timeout=5)
+            # 增加超时时间到10秒，减少高峰期超时错误
+            res = requests.post(url, headers=headers, data=data, timeout=10)
             # 检查 HTTP 状态码
             if res.status_code != 200:
-                print(f"⚠️ 座位 {seat_number} HTTP错误：{res.status_code}")
+                if not success:  # 只在未成功时打印
+                    print(f"⚠️ 座位 {seat_number} HTTP错误：{res.status_code}")
                 time.sleep(retry_interval)
                 continue
             
@@ -102,71 +105,106 @@ def reserve(seat_number, start_time=None):
             try:
                 result = res.json()
             except ValueError as e:
-                print(f"⚠️ 座位 {seat_number} JSON解析失败：{e}，响应内容：{res.text[:100]}")
+                if not success:  # 只在未成功时打印
+                    print(f"⚠️ 座位 {seat_number} JSON解析失败：{e}，响应内容：{res.text[:100]}")
                 time.sleep(retry_interval)
                 continue
             
             msg = result.get("msg", "")
-            # 核心改动：判断 code 是否为 0
-            if result.get("code") == 0:
+            code = result.get("code")
+            
+            # 情况1：直接抢成功（code == 0）
+            if code == 0:
                 with lock:
-                    success = True
-                print(f"✅ 成功预约座位：{seat_number}")
-                check_reservation_success()
+                    if not success:  # 双重检查锁，确保只执行一次
+                        success = True
+                        print(f"\n🎯 【核心喜报】恭喜！成功抢到座位！")
+                        if not check_called:
+                            check_called = True
+                            check_reservation_success()
                 return
-            elif "已有预约" in msg or "已有预约记录" in msg:
+            
+            # 情况2：已有预约记录（说明已经成功，可能是其他线程抢到的）
+            elif "已有预约" in msg or "已有预约记录" in msg or "该账号今日有预约记录" in msg:
                 with lock:
-                    success = True
-                print(f"⚠️ 提示已有预约，停止操作")
-                check_reservation_success()
+                    if not success:  # 双重检查锁
+                        success = True
+                        print(f"\n⚠️ 【同步通知】检测到账号已有预约成功记录，正在同步停止所有抢座线程...")
+                        if not check_called:
+                            check_called = True
+                            check_reservation_success()
                 return
+            
+            # 情况3：其他失败情况
             else:
-                if retry_interval < 1:
-                    print(f"❌ 座位 {seat_number} 预约失败：{msg}，继续重试...")
-                else:
-                    print(f"❌ 座位 {seat_number} 预约失败：{msg}，{retry_interval//60}分钟后重试")
+                if not success:  # 只在未成功时打印失败信息
+                    if retry_interval < 1:
+                        print(f"❌ 座位 {seat_number} 预约失败：{msg}，继续重试...")
+                    else:
+                        print(f"❌ 座位 {seat_number} 预约失败：{msg}，{retry_interval//60}分钟后重试")
+        
+        except requests.exceptions.Timeout:
+            if not success:  # 只在未成功时打印超时信息
+                pass  # 高峰期超时很常见，不打印避免刷屏
         except requests.exceptions.RequestException as e:
-            print(f"⚠️ 请求异常: {e}")
+            if not success:  # 只在未成功时打印
+                print(f"⚠️ 座位 {seat_number} 网络异常: {e}")
         except Exception as e:
-            print(f"⚠️ 未知异常: {e}")
+            if not success:  # 只在未成功时打印
+                print(f"⚠️ 座位 {seat_number} 未知异常: {e}")
+        
         time.sleep(retry_interval)
 
 def check_reservation_success():
+    """专门优化的查询函数：精准显示你到底抢到了哪个座"""
+    # 给服务器一点缓冲时间，确保数据已同步
+    time.sleep(0.5)
+    
     url = f"{BASE_URL}/api/mod/venue/enrol?openId={OPEN_ID}&status=0&page=1&limit=10"
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code != 200:
             print(f"❌ 获取预约记录失败：HTTP {res.status_code}")
+            print("📭 请手动打开小程序确认预约结果")
             return
         
         try:
             data = res.json()
         except ValueError:
             print("❌ 获取预约记录失败：响应不是有效的JSON格式")
+            print("📭 请手动打开小程序确认预约结果")
             return
         
         # 检查响应 code
         if data.get("code") != 0:
             print(f"❌ 获取预约记录失败：{data.get('msg', '未知错误')}")
+            print("📭 请手动打开小程序确认预约结果")
             return
         
         records = data.get("data", {}).get("records", [])
         if not records:
-            print("📭 没有查到预约记录")
+            print("📭 暂未在服务器同步记录中发现座位，请手动打开小程序确认。")
             return
         
-        print("📌 当前预约记录：")
+        # 显示最终预约确认清单
+        print("\n" + "="*50)
+        print("🎊 【最终预约确认清单】 🎊")
+        print("="*50)
         for rec in records:
-            seat = rec.get('seatNumberList', '未知')
+            seat_no = rec.get('seatNumberList', '未知')
             # 根据抓包，日期字段可能是 reserveDay 或 day
             day = rec.get('reserveDay') or rec.get('day', '未知')
-            title = rec.get('title', '未知场馆')
+            venue = rec.get('title', '未知场馆')
             status = rec.get('appointStatusName') or rec.get('appointStatusMsg', '未知状态')
-            print(f"🪑 场馆：{title} | 座位：{seat} | 日期：{day} | 状态：{status}")
+            print(f"✅ 成功锁定 -> 场馆：{venue} | 座位号：{seat_no} | 日期：{day} | 状态：{status}")
+        print("="*50 + "\n")
+        
     except requests.exceptions.RequestException as e:
         print(f"❌ 获取预约记录失败：{e}")
+        print("📭 请手动打开小程序确认预约结果")
     except Exception as e:
         print(f"❌ 获取预约记录失败：{e}")
+        print("📭 请手动打开小程序确认预约结果")
 
 def wait_until_target_time():
     """精准对时：等待到 21:59:59.850 左右自动触发"""
